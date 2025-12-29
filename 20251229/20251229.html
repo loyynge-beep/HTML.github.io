@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>生存槍戰：BOSS 彈幕版</title>
+    <style>
+        body { margin: 0; background: #1a1a1a; color: white; font-family: 'Segoe UI', sans-serif; overflow: hidden; display: flex; flex-direction: center; align-items: center; justify-content: center; }
+        #container { position: relative; }
+        canvas { background: #1b2631; cursor: crosshair; border: 4px solid #34495e; box-shadow: 0 0 30px rgba(0,0,0,0.8); }
+        .info { position: absolute; top: 10px; left: 20px; pointer-events: none; }
+        .hp-bar-container { width: 200px; height: 12px; background: #444; border: 2px solid #fff; margin: 5px 0; }
+        #playerHpFill { width: 100%; height: 100%; background: #2ecc71; transition: width 0.1s; }
+        .ammo-ui { font-size: 18px; color: #f1c40f; font-weight: bold; }
+        .goal-ui { font-size: 18px; color: #3498db; background: rgba(0,0,0,0.6); padding: 5px 10px; border-radius: 5px; }
+
+        #shop { display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); 
+                background: rgba(20,20,20,0.95); padding: 25px; border-radius: 15px; border: 3px solid #f1c40f; text-align: center; z-index: 100; width: 450px; }
+        .shop-grid { display: flex; flex-wrap: wrap; justify-content: center; }
+        .shop-item { background: #2c3e50; margin: 8px; padding: 12px; border-radius: 8px; cursor: pointer; transition: 0.2s; width: 180px; border: 1px solid #555; }
+        .shop-item:hover { background: #f39c12; color: black; }
+        
+        #gameOver { display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; background: rgba(0,0,0,0.9); padding: 40px; border-radius: 15px; border: 2px solid #e74c3c; z-index: 10; }
+        #bossAlert { display: none; position: absolute; top: 150px; width: 100%; text-align: center; color: #ff4757; font-size: 50px; font-weight: bold; text-shadow: 3px 3px #000; animation: blink 0.5s infinite; }
+        @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0; } 100% { opacity: 1; } }
+    </style>
+</head>
+<body>
+
+    <div id="container">
+        <div id="bossAlert">BOSS INCOMING!</div>
+        <div class="info">
+            <div class="goal-ui">目標: <span id="goalText">0 / 15</span></div>
+            <div id="scoreDisplay">得分: 0</div>
+            <div class="hp-bar-container"><div id="playerHpFill"></div></div>
+            <div class="ammo-ui"><span id="weaponName">手槍</span> | <span id="ammoText">12 / 36</span></div>
+        </div>
+
+        <div id="shop">
+            <h2>--- 戰略商店 ---</h2>
+            <p>剩餘得分: <span id="shopScore">0</span></p>
+            <div class="shop-grid">
+                <div class="shop-item" onclick="buy('rifle', 500)"><h3>步槍 (500)</h3></div>
+                <div class="shop-item" onclick="buy('sniper', 800)"><h3>狙擊槍 (800)</h3></div>
+                <div class="shop-item" onclick="buy('shotgun', 600)"><h3>霰彈槍 (600)</h3></div>
+                <div class="shop-item" onclick="buy('ammo', 200)"><h3>補滿彈藥 (200)</h3></div>
+                <div class="shop-item" onclick="buy('hp', 300)"><h3>醫療包 (300)</h3></div>
+            </div>
+            <button onclick="closeShop()" style="margin-top:20px; padding:10px 30px; background:#7f8c8d; color:white; border:none; border-radius:5px; cursor:pointer;">繼續前進</button>
+        </div>
+
+        <div id="gameOver">
+            <h1>戰死沙場</h1>
+            <button onclick="location.reload()" style="padding:10px 25px; background:#27ae60; color:white; border:none; border-radius:5px; cursor:pointer;">重新挑戰</button>
+        </div>
+
+        <canvas id="gameCanvas"></canvas>
+    </div>
+
+<script>
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+    canvas.width = 800; canvas.height = 600;
+
+    let mouseX = 0, mouseY = 0, score = 0, kills = 0, isGameOver = false, isPaused = false, shake = 0;
+    let currentGoal = 15;
+    let bossActive = false;
+
+    const weapons = {
+        pistol: { name: "手槍", fireRate: 350, magSize: 12, ammo: 36, dmg: 25, pierce: 1 },
+        rifle: { name: "步槍", fireRate: 90, magSize: 30, ammo: 90, dmg: 25, pierce: 1 },
+        sniper: { name: "狙擊槍", fireRate: 900, magSize: 5, ammo: 15, dmg: 50, pierce: 2 },
+        shotgun: { name: "霰彈槍", fireRate: 650, magSize: 8, ammo: 24, dmg: 60, pierce: 1 }
+    };
+
+    let currentWp = weapons.pistol;
+    let mag = currentWp.magSize, reserve = currentWp.ammo, grenades = 1;
+    const player = { x: 400, y: 500, hp: 50, lastShot: 0 };
+    let bullets = [], bossBullets = [], enemies = [], explosions = [], thrownG = [], keys = {};
+
+    window.onkeydown = e => keys[e.key.toLowerCase()] = true;
+    window.onkeyup = e => {
+        delete keys[e.key.toLowerCase()];
+        if(e.key.toLowerCase()==='g') throwG();
+        if(e.key.toLowerCase()==='r') reload();
+    };
+    canvas.onmousemove = e => { const r = canvas.getBoundingClientRect(); mouseX = e.clientX-r.left; mouseY = e.clientY-r.top; };
+    
+    canvas.onmousedown = () => {
+        if (isGameOver || isPaused || mag <= 0) return;
+        const now = Date.now();
+        if (now - player.lastShot < currentWp.fireRate) return;
+        const ang = Math.atan2(mouseY - player.y, mouseX - player.x);
+        if (currentWp.name === "霰彈槍") {
+            for(let i=-2; i<=2; i++) bullets.push({ x: player.x, y: player.y, vx: Math.cos(ang + i*0.2)*8, vy: Math.sin(ang + i*0.2)*8, dmg: 60, p: 1 });
+        } else {
+            bullets.push({ x: player.x, y: player.y, vx: Math.cos(ang)*12, vy: Math.sin(ang)*12, dmg: currentWp.dmg, p: currentWp.pierce });
+        }
+        mag--; player.lastShot = now; updateUI();
+    };
+
+    function throwG() {
+        if (grenades <= 0 || isPaused) return;
+        grenades--;
+        const ang = Math.atan2(mouseY - player.y, mouseX - player.x);
+        thrownG.push({ x: player.x, y: player.y, vx: Math.cos(ang)*7, vy: Math.sin(ang)*7, timer: 35 });
+        updateUI();
+    }
+
+    function buy(item, price) {
+        if (score < price) return;
+        score -= price;
+        if (weapons[item]) { currentWp = weapons[item]; mag = currentWp.magSize; reserve = currentWp.ammo; }
+        else if (item === 'ammo') { reserve += 100; }
+        else if (item === 'hp') { player.hp = Math.min(50, player.hp + 25); }
+        updateUI();
+    }
+
+    function closeShop() { document.getElementById("shop").style.display = "none"; isPaused = false; kills = 0; currentGoal += 5; updateUI(); }
+    function reload() { let n = currentWp.magSize - mag; let r = Math.min(n, reserve); mag += r; reserve -= r; updateUI(); }
+
+    function spawnBoss() {
+        bossActive = true;
+        document.getElementById("bossAlert").style.display = "block";
+        setTimeout(() => document.getElementById("bossAlert").style.display = "none", 3000);
+        enemies.push({ 
+            x: 400, y: -100, hp: 200, maxHp: 200, size: 70, speed: 0.6, isBoss: true, 
+            lastAttack: 0, lastSpiral: 0 
+        });
+    }
+
+    function updateUI() {
+        document.getElementById("goalText").innerText = `${kills} / ${currentGoal}`;
+        document.getElementById("scoreDisplay").innerText = `得分: ${score}`;
+        document.getElementById("ammoText").innerText = `${mag} / ${reserve}`;
+        document.getElementById("weaponName").innerText = currentWp.name;
+        document.getElementById("playerHpFill").style.width = (player.hp / 50) * 100 + "%";
+        document.getElementById("shopScore").innerText = score;
+    }
+
+    function update() {
+        if (isGameOver || isPaused) return;
+
+        if (keys['w'] && player.y > 0) player.y -= 4;
+        if (keys['s'] && player.y < canvas.height) player.y += 4;
+        if (keys['a'] && player.x > 0) player.x -= 4;
+        if (keys['d'] && player.x < canvas.width) player.x += 4;
+
+        if (shake > 0) shake *= 0.9;
+
+        // BOSS 攻擊 AI
+        enemies.forEach(en => {
+            if (en.isBoss) {
+                const now = Date.now();
+                // 1. 狙擊追蹤彈 (1秒一次)
+                if (now - en.lastAttack > 1000) {
+                    const ang = Math.atan2(player.y - en.y, player.x - en.x);
+                    bossBullets.push({ x: en.x, y: en.y, vx: Math.cos(ang)*6, vy: Math.sin(ang)*6 });
+                    en.lastAttack = now;
+                }
+                // 2. 圓形彈幕 (2秒一次)
+                if (now - en.lastSpiral > 2000) {
+                    for(let i=0; i<12; i++) {
+                        const ang = (Math.PI*2 / 12) * i;
+                        bossBullets.push({ x: en.x, y: en.y, vx: Math.cos(ang)*4, vy: Math.sin(ang)*4 });
+                    }
+                    en.lastSpiral = now;
+                }
+            }
+        });
+
+        // BOSS 子彈邏輯
+        bossBullets.forEach((bb, i) => {
+            bb.x += bb.vx; bb.y += bb.vy;
+            if (Math.hypot(player.x - bb.x, player.y - bb.y) < 15) {
+                player.hp -= 5; bossBullets.splice(i, 1); updateUI();
+                if (player.hp <= 0) { isGameOver = true; document.getElementById("gameOver").style.display = "block"; }
+            }
+            if (bb.x<0 || bb.x>800 || bb.y<0 || bb.y>600) bossBullets.splice(i, 1);
+        });
+
+        // 玩家子彈與敵人碰撞
+        bullets.forEach((b, bi) => {
+            b.x += b.vx; b.y += b.vy;
+            enemies.forEach((en, ei) => {
+                if (Math.hypot(b.x - en.x, b.y - en.y) < en.size/2) {
+                    en.hp -= b.dmg;
+                    if(currentWp.name === "狙擊槍") b.dmg = 25; 
+                    if (b.p <= 1) bullets.splice(bi, 1); else b.p--;
+                    if (en.hp <= 0) { 
+                        if (en.isBoss) { score += 1000; bossActive = false; isPaused = true; document.getElementById("shop").style.display = "block"; }
+                        else { score += 20; kills++; }
+                        enemies.splice(ei, 1);
+                        if (kills >= currentGoal && currentGoal === 40 && !bossActive) spawnBoss();
+                        else if (kills >= currentGoal && !bossActive) { isPaused = true; document.getElementById("shop").style.display = "block"; }
+                        updateUI();
+                    }
+                }
+            });
+        });
+
+        // 手榴彈
+        thrownG.forEach((g, i) => {
+            g.x += g.vx; g.y += g.vy; g.timer--;
+            if (g.timer <= 0) { 
+                shake = 15; explosions.push({x: g.x, y: g.y, r: 0, life: 25}); 
+                enemies.forEach(en => { if(Math.hypot(g.x-en.x, g.y-en.y) < 180) en.hp -= 150; });
+                thrownG.splice(i, 1);
+            }
+        });
+
+        explosions.forEach((ex, i) => { ex.r += 10; ex.life--; if(ex.life<=0) explosions.splice(i, 1); });
+
+        // 普通敵人生成
+        if (!bossActive && Math.random() < 0.02 && enemies.length < 10) {
+            enemies.push({ x: Math.random()*800, y: -20, hp: 50, size: 25, speed: 1.5, isBoss: false });
+        }
+
+        enemies.forEach(en => {
+            const ang = Math.atan2(player.y - en.y, player.x - en.x);
+            en.x += Math.cos(ang)*en.speed; en.y += Math.sin(ang)*en.speed;
+            if (Math.hypot(player.x - en.x, player.y - en.y) < en.size/2 + 10) {
+                player.hp -= en.isBoss ? 0.5 : 0.2; updateUI();
+                if (player.hp <= 0) { isGameOver = true; document.getElementById("gameOver").style.display = "block"; }
+            }
+        });
+    }
+
+    function draw() {
+        ctx.save();
+        if (shake > 0.5) ctx.translate(Math.random()*shake-shake/2, Math.random()*shake-shake/2);
+        ctx.clearRect(-50, -50, canvas.width+100, canvas.height+100);
+
+        // 畫 BOSS 子彈
+        ctx.fillStyle = "#ff4757";
+        bossBullets.forEach(bb => { ctx.beginPath(); ctx.arc(bb.x, bb.y, 6, 0, Math.PI*2); ctx.fill(); ctx.strokeStyle="white"; ctx.stroke(); });
+
+        // 畫爆炸與手榴彈
+        ctx.fillStyle = "#9b59b6"; thrownG.forEach(g => { ctx.beginPath(); ctx.arc(g.x, g.y, 10, 0, Math.PI*2); ctx.fill(); });
+        explosions.forEach(ex => { ctx.beginPath(); ctx.arc(ex.x, ex.y, ex.r, 0, Math.PI*2); ctx.fillStyle = `rgba(231,76,60,${ex.life/25})`; ctx.fill(); });
+
+        // 畫玩家與玩家子彈
+        ctx.fillStyle = "#f39c12"; bullets.forEach(b => { ctx.beginPath(); ctx.arc(b.x, b.y, 4, 0, Math.PI*2); ctx.fill(); });
+        ctx.fillStyle = "#3498db"; ctx.fillRect(player.x-12, player.y-12, 24, 24);
+
+        // 畫敵人
+        enemies.forEach(en => {
+            ctx.fillStyle = en.isBoss ? (en.hp < 100 ? "#c0392b" : "#8e44ad") : "#e74c3c";
+            ctx.fillRect(en.x-en.size/2, en.y-en.size/2, en.size, en.size);
+            // 血條
+            ctx.fillStyle = "#000"; ctx.fillRect(en.x-en.size/2, en.y-en.size/2-15, en.size, 6);
+            ctx.fillStyle = "#2ecc71"; ctx.fillRect(en.x-en.size/2, en.y-en.size/2-15, (en.hp/(en.isBoss?200:50))*en.size, 6);
+        });
+
+        ctx.restore();
+        update(); requestAnimationFrame(draw);
+    }
+    draw(); updateUI();
+</script>
+</body>
+</html>
